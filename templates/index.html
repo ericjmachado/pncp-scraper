@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PNCP Analyzer</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #f5f5f5; color: #222; }
+  header { background: #1a3c6e; color: #fff; padding: 10px 16px; display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+  header h1 { font-size: 18px; margin: 0; }
+  #stats { font-size: 13px; opacity: .85; }
+  #filtros { background: #fff; padding: 10px 16px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; border-bottom: 1px solid #ddd; }
+  #filtros input, #filtros select, #filtros button { padding: 6px 8px; font-size: 14px; border: 1px solid #bbb; border-radius: 4px; }
+  #q { width: 260px; }
+  #filtros button { background: #1a3c6e; color: #fff; border: 0; cursor: pointer; }
+  label.chk { font-size: 13px; display: flex; align-items: center; gap: 4px; }
+  main { padding: 12px 16px; }
+  #resumo { font-size: 13px; color: #555; margin-bottom: 8px; }
+  table { width: 100%; border-collapse: collapse; background: #fff; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e5e5e5; vertical-align: top; }
+  th { background: #eef2f7; position: sticky; top: 0; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: #f0f6ff; }
+  .aberta { color: #0a7d33; font-weight: 600; }
+  .urgente { color: #c77700; font-weight: 600; }
+  .encerrada { color: #999; }
+  .num { text-align: right; white-space: nowrap; }
+  #paginacao { margin: 12px 0; display: flex; gap: 8px; align-items: center; font-size: 14px; }
+  #paginacao button { padding: 4px 12px; }
+  dialog { width: min(900px, 95vw); max-height: 90vh; border: 1px solid #999; border-radius: 6px; padding: 0; }
+  dialog .conteudo { padding: 16px; overflow-y: auto; max-height: 85vh; font-size: 14px; }
+  dialog h2 { font-size: 16px; margin-top: 0; }
+  dialog h3 { font-size: 14px; margin: 14px 0 6px; border-bottom: 1px solid #ddd; }
+  dialog table { font-size: 12px; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: #e0ecdf; color: #0a7d33; margin-left: 6px; }
+  .fechar { float: right; cursor: pointer; font-size: 20px; border: 0; background: none; }
+  a { color: #1a5cb0; }
+  .campo { margin: 3px 0; }
+  .campo b { color: #444; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PNCP Analyzer — editais e contratações</h1>
+  <span id="stats">carregando…</span>
+</header>
+
+<div id="filtros">
+  <input id="q" placeholder="buscar no objeto/órgão (ex.: software gestão)">
+  <label class="chk" title="{{ perfil_termos|join(', ') }}"><input type="checkbox" id="perfil" checked> Meu perfil (TI/software)</label>
+  <select id="uf">
+    <option value="">UF: todas</option>
+    {% for u in "AC AL AP AM BA CE DF ES GO MA MT MS MG PA PB PR PE PI RJ RN RS RO RR SC SP SE TO".split() %}
+    <option>{{ u }}</option>{% endfor %}
+  </select>
+  <select id="modalidade">
+    <option value="">Modalidade: todas</option>
+    {% for id, nome in modalidades.items() %}<option value="{{ id }}">{{ nome }}</option>{% endfor %}
+  </select>
+  <select id="status">
+    <option value="abertas">Recebendo propostas</option>
+    <option value="">Todas</option>
+    <option value="encerradas">Encerradas</option>
+  </select>
+  <input id="valor_min" type="number" placeholder="valor mín (R$)" style="width:110px">
+  <input id="valor_max" type="number" placeholder="valor máx (R$)" style="width:110px">
+  <label class="chk"><input type="checkbox" id="srp"> Só registro de preço</label>
+  <select id="ordem">
+    <option value="publicacao">Mais recentes</option>
+    <option value="encerramento">Prazo mais próximo</option>
+    <option value="valor">Maior valor</option>
+  </select>
+  <button onclick="buscar(1)">Buscar</button>
+</div>
+
+<main>
+  <div id="resumo"></div>
+  <table>
+    <thead><tr>
+      <th>Publicação</th><th>Encerra propostas</th><th>Órgão</th><th>Local</th>
+      <th>Modalidade</th><th>Objeto</th><th class="num">Valor estimado</th>
+    </tr></thead>
+    <tbody id="corpo"></tbody>
+  </table>
+  <div id="paginacao"></div>
+</main>
+
+<dialog id="detalhe"><div class="conteudo" id="detalhe-corpo"></div></dialog>
+
+<script>
+const fmtBRL = v => v == null ? "—" : v.toLocaleString("pt-BR", {style:"currency", currency:"BRL"});
+const fmtData = s => s ? new Date(s).toLocaleDateString("pt-BR") : "—";
+const fmtDataHora = s => s ? new Date(s).toLocaleString("pt-BR") : "—";
+const esc = s => (s ?? "").toString().replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function classEncerramento(s) {
+  if (!s) return "encerrada";
+  const dias = (new Date(s) - Date.now()) / 864e5;
+  if (dias < 0) return "encerrada";
+  return dias <= 5 ? "urgente" : "aberta";
+}
+
+async function buscar(pagina) {
+  const p = new URLSearchParams({ pagina,
+    q: q.value, uf: uf.value, modalidade: modalidade.value, status: status_.value,
+    valor_min: valor_min.value, valor_max: valor_max.value, ordem: ordem.value,
+    perfil: perfil.checked ? "1" : "", srp: srp.checked ? "1" : "" });
+  resumo.textContent = "buscando…";
+  const d = await (await fetch("/api/busca?" + p)).json();
+  resumo.textContent = `${d.total.toLocaleString("pt-BR")} editais encontrados`;
+  corpo.innerHTML = d.resultados.map(r => `
+    <tr onclick="abrir('${esc(r.numero_controle)}')">
+      <td>${fmtData(r.data_publicacao)}</td>
+      <td class="${classEncerramento(r.data_encerramento)}">${fmtDataHora(r.data_encerramento)}</td>
+      <td>${esc(r.orgao)}</td>
+      <td>${esc(r.municipio)}/${esc(r.uf)}</td>
+      <td>${esc(r.modalidade)}${r.srp ? " (SRP)" : ""}</td>
+      <td>${esc((r.objeto || "").slice(0, 220))}${(r.objeto||"").length > 220 ? "…" : ""}</td>
+      <td class="num">${fmtBRL(r.valor_estimado)}</td>
+    </tr>`).join("") || "<tr><td colspan=7>nada encontrado — rode o scraper ou mude os filtros</td></tr>";
+  paginacao.innerHTML = d.paginas > 1 ? `
+    <button ${d.pagina <= 1 ? "disabled" : ""} onclick="buscar(${d.pagina - 1})">‹ anterior</button>
+    página ${d.pagina} de ${d.paginas}
+    <button ${d.pagina >= d.paginas ? "disabled" : ""} onclick="buscar(${d.pagina + 1})">próxima ›</button>` : "";
+}
+
+async function abrir(nc) {
+  detalhe.showModal();
+  document.getElementById("detalhe-corpo").innerHTML = "<p>carregando itens e documentos do PNCP…</p>";
+  const d = await (await fetch("/api/edital?nc=" + encodeURIComponent(nc))).json();
+  const r = d.raw;
+  const urlPncp = `https://pncp.gov.br/app/editais/${d.cnpj}/${d.ano}/${d.sequencial}`;
+  document.getElementById("detalhe-corpo").innerHTML = `
+    <button class="fechar" onclick="detalhe.close()">✕</button>
+    <h2>${esc(d.modalidade)} ${esc(r.numeroCompra || "")} — ${esc(d.orgao)}
+      ${d.me_epp ? '<span class="tag">benefício ME/EPP</span>' : ""}
+      ${d.srp ? '<span class="tag">registro de preço</span>' : ""}</h2>
+    <div class="campo"><b>Controle PNCP:</b> ${esc(d.numero_controle)} · <a href="${urlPncp}" target="_blank">ver no portal PNCP ↗</a>
+      ${r.linkSistemaOrigem ? ` · <a href="${esc(r.linkSistemaOrigem)}" target="_blank">sistema de origem ↗</a>` : ""}</div>
+    <div class="campo"><b>Objeto:</b> ${esc(d.objeto)}</div>
+    ${r.informacaoComplementar ? `<div class="campo"><b>Info complementar:</b> ${esc(r.informacaoComplementar)}</div>` : ""}
+    <div class="campo"><b>Local:</b> ${esc(d.municipio)}/${esc(d.uf)} — ${esc(d.unidade)}</div>
+    <div class="campo"><b>Situação:</b> ${esc(d.situacao)} · <b>Publicado:</b> ${fmtDataHora(d.data_publicacao)}
+      · <b>Propostas:</b> ${fmtDataHora(d.data_abertura)} até <span class="${classEncerramento(d.data_encerramento)}">${fmtDataHora(d.data_encerramento)}</span></div>
+    <div class="campo"><b>Valor estimado:</b> ${fmtBRL(d.valor_estimado)}
+      ${d.valor_homologado ? ` · <b>Homologado:</b> ${fmtBRL(d.valor_homologado)}` : ""}
+      · <b>Amparo:</b> ${esc(r.amparoLegal?.nome || "—")}</div>
+    ${d.erro_detalhe ? `<p style="color:#b00">${esc(d.erro_detalhe)}</p>` : ""}
+    <h3>Itens (${d.itens.length})</h3>
+    <table><thead><tr><th>#</th><th>Descrição</th><th class="num">Qtd</th><th class="num">Unitário</th><th class="num">Total</th><th>Benefício</th></tr></thead>
+    <tbody>${d.itens.map(i => `<tr>
+      <td>${i.numeroItem}</td><td>${esc(i.descricao)}</td>
+      <td class="num">${i.quantidade ?? "—"}</td>
+      <td class="num">${fmtBRL(i.valorUnitarioEstimado)}</td>
+      <td class="num">${fmtBRL(i.valorTotal)}</td>
+      <td>${esc(i.tipoBeneficioNome || "—")}</td></tr>`).join("")}</tbody></table>
+    <h3>Documentos (${d.arquivos.length})</h3>
+    <ul>${d.arquivos.map(a => `<li>
+      <a href="${esc(a.url)}" target="_blank">${esc(a.titulo || "documento")}</a>
+      <small>(${esc(a.tipoDocumentoNome || "")})</small>
+      ${a.local ? ` — <a href="${esc(a.local)}" target="_blank">cópia local</a>` : ""}</li>`).join("") || "<li>nenhum</li>"}</ul>`;
+}
+
+const [q, uf, modalidade, valor_min, valor_max, ordem, perfil, srp, resumo, corpo, paginacao, detalhe] =
+  ["q","uf","modalidade","valor_min","valor_max","ordem","perfil","srp","resumo","corpo","paginacao","detalhe"]
+  .map(id => document.getElementById(id));
+const status_ = document.getElementById("status");
+q.addEventListener("keydown", e => { if (e.key === "Enter") buscar(1); });
+
+fetch("/api/stats").then(r => r.json()).then(s => {
+  stats.textContent = `${s.total.toLocaleString("pt-BR")} editais no banco · ${s.abertas.toLocaleString("pt-BR")} recebendo propostas · última sync: ${s.ultima_sync || "nunca"}`;
+});
+buscar(1);
+</script>
+</body>
+</html>
