@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Interface web do pncp-analyzer. Rode: python app.py (http://localhost:5000)"""
+
 import json
 from datetime import datetime
 
@@ -20,8 +21,9 @@ BENEFICIOS_ME_EPP = {1, 3}
 
 @app.route("/")
 def index():
-    return render_template("index.html", modalidades=MODALIDADES,
-                           perfil_termos=perfil.TERMOS)
+    return render_template(
+        "index.html", modalidades=MODALIDADES, perfil_termos=perfil.TERMOS
+    )
 
 
 @app.get("/api/busca")
@@ -36,7 +38,9 @@ def busca():
     if a.get("q", "").strip():
         fts.append(f"({perfil.fts_query_usuario(a['q'].strip())})")
     if fts:
-        where.append("e.id IN (SELECT rowid FROM editais_fts WHERE editais_fts MATCH ?)")
+        where.append(
+            "e.id IN (SELECT rowid FROM editais_fts WHERE editais_fts MATCH ?)"
+        )
         params.append(" AND ".join(fts))
     if a.get("uf"):
         where.append("e.uf = ?")
@@ -67,7 +71,9 @@ def busca():
         "publicacao": "e.data_publicacao DESC",
     }.get(a.get("ordem", "publicacao"), "e.data_publicacao DESC")
 
-    total = con.execute(f"SELECT COUNT(*) c FROM editais e {sql_where}", params).fetchone()["c"]
+    total = con.execute(
+        f"SELECT COUNT(*) c FROM editais e {sql_where}", params
+    ).fetchone()["c"]
     pagina = max(1, int(a.get("pagina", 1)))
     rows = con.execute(
         f"""SELECT e.numero_controle, e.cnpj, e.ano, e.sequencial, e.objeto, e.orgao,
@@ -77,23 +83,30 @@ def busca():
             LIMIT 50 OFFSET ?""",
         params + [(pagina - 1) * 50],
     ).fetchall()
-    return jsonify(total=total, pagina=pagina, paginas=(total + 49) // 50,
-                   resultados=[dict(r) for r in rows])
+    return jsonify(
+        total=total,
+        pagina=pagina,
+        paginas=(total + 49) // 50,
+        resultados=[dict(r) for r in rows],
+    )
 
 
 @app.get("/api/edital")
 def edital():
     nc = request.args.get("nc", "")
     con = db.get_db()
-    row = con.execute("SELECT * FROM editais WHERE numero_controle = ?", (nc,)).fetchone()
+    row = con.execute(
+        "SELECT * FROM editais WHERE numero_controle = ?", (nc,)
+    ).fetchone()
     if not row:
         return jsonify(erro="não encontrado"), 404
     d = dict(row)
     d["raw"] = json.loads(d["raw"], strict=False)
     if d["itens"] is None:
         try:
-            itens, arquivos = scraper.fetch_detalhe(con, row["id"], row["cnpj"],
-                                                    row["ano"], row["sequencial"])
+            itens, arquivos = scraper.fetch_detalhe(
+                con, row["id"], row["cnpj"], row["ano"], row["sequencial"]
+            )
             d["itens"], d["arquivos"] = itens, arquivos
         except Exception as e:
             logger.exception(f"falha ao buscar itens/arquivos de {nc} no PNCP")
@@ -104,7 +117,11 @@ def edital():
         d["arquivos"] = json.loads(d["arquivos"] or "[]", strict=False)
     d["me_epp"] = any(i.get("tipoBeneficio") in BENEFICIOS_ME_EPP for i in d["itens"])
     pasta = scraper.pasta_docs(nc)
-    locais = {f.name.split("_", 1)[0].lstrip("0"): f.name for f in pasta.glob("*")} if pasta.is_dir() else {}
+    locais = (
+        {f.name.split("_", 1)[0].lstrip("0"): f.name for f in pasta.glob("*")}
+        if pasta.is_dir()
+        else {}
+    )
     for arq in d["arquivos"]:
         nome = locais.get(str(arq.get("sequencialDocumento", "")))
         arq["local"] = f"/docs/{pasta.name}/{nome}" if nome else None
@@ -122,8 +139,9 @@ def stats():
     agora = datetime.now().isoformat()
     return jsonify(
         total=con.execute("SELECT COUNT(*) c FROM editais").fetchone()["c"],
-        abertas=con.execute("SELECT COUNT(*) c FROM editais WHERE data_encerramento >= ?",
-                            (agora,)).fetchone()["c"],
+        abertas=con.execute(
+            "SELECT COUNT(*) c FROM editais WHERE data_encerramento >= ?", (agora,)
+        ).fetchone()["c"],
         ultima_sync=db.meta_get(con, "ultima_sync"),
     )
 

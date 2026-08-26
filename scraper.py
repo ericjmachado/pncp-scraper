@@ -10,6 +10,7 @@ Uso:
 
 Retomável: interrompa com Ctrl+C e rode de novo que continua de onde parou.
 """
+
 import argparse
 import json
 import re
@@ -27,8 +28,13 @@ from db import MODALIDADES_NOMES, init_db, meta_get, meta_set, upsert_edital
 # console mostra INFO+; o arquivo guarda tudo (DEBUG inclui cada requisição HTTP)
 logger.remove()
 logger.add(sys.stderr, level="INFO")
-logger.add(Path(__file__).parent / "logs" / "scraper.log",
-           rotation="20 MB", retention=10, encoding="utf-8", level="DEBUG")
+logger.add(
+    Path(__file__).parent / "logs" / "scraper.log",
+    rotation="20 MB",
+    retention=10,
+    encoding="utf-8",
+    level="DEBUG",
+)
 
 CONSULTA = "https://pncp.gov.br/api/consulta"
 PNCP_API = "https://pncp.gov.br/api/pncp"
@@ -48,18 +54,24 @@ def get_json(url, params=None):
         try:
             resp = session.get(url, params=params, timeout=60)
         except requests.RequestException as e:
-            logger.warning(f"erro de rede ({e}) em {url} "
-                           f"(tentativa {tentativa + 1}/9), tentando de novo...")
+            logger.warning(
+                f"erro de rede ({e}) em {url} "
+                f"(tentativa {tentativa + 1}/9), tentando de novo..."
+            )
             time.sleep(5 * (tentativa + 1))
             continue
-        logger.debug(f"GET {resp.url} -> {resp.status_code} "
-                     f"({len(resp.content) // 1024} KB em {time.monotonic() - t0:.2f}s)")
+        logger.debug(
+            f"GET {resp.url} -> {resp.status_code} "
+            f"({len(resp.content) // 1024} KB em {time.monotonic() - t0:.2f}s)"
+        )
         if resp.status_code in (204, 404):
             return None
         if resp.status_code == 429 or resp.status_code >= 500:
             espera = min(5 * 2**tentativa, 120)
-            logger.warning(f"HTTP {resp.status_code} (tentativa {tentativa + 1}/9), "
-                           f"aguardando {espera}s...")
+            logger.warning(
+                f"HTTP {resp.status_code} (tentativa {tentativa + 1}/9), "
+                f"aguardando {espera}s..."
+            )
             time.sleep(espera)
             continue
         resp.raise_for_status()
@@ -88,9 +100,11 @@ def _paginar(con, url, params, rotulo):
         for r in d["data"]:
             upsert_edital(con, r)
         con.commit()
-        logger.info(f"{rotulo}: página {pagina}/{d['totalPaginas']} — "
-                    f"{len(ncs)} registros ({len(ncs) - existiam} novos, {existiam} atualizados) "
-                    f"| {d['totalRegistros']} no período")
+        logger.info(
+            f"{rotulo}: página {pagina}/{d['totalPaginas']} — "
+            f"{len(ncs)} registros ({len(ncs) - existiam} novos, {existiam} atualizados) "
+            f"| {d['totalRegistros']} no período"
+        )
         yield pagina
         if pagina >= d["totalPaginas"]:
             break
@@ -99,8 +113,10 @@ def _paginar(con, url, params, rotulo):
 
 def backfill(desde, ate, uf=None):
     con = init_db()
-    logger.info(f"backfill de {desde} a {ate} (uf={uf or 'BR'}) — "
-                f"{total_no_banco(con)} editais no banco")
+    logger.info(
+        f"backfill de {desde} a {ate} (uf={uf or 'BR'}) — "
+        f"{total_no_banco(con)} editais no banco"
+    )
     d1, d2 = desde.replace("-", ""), ate.replace("-", "")
     for m in MODALIDADES:
         nome = MODALIDADES_NOMES[m]
@@ -113,11 +129,18 @@ def backfill(desde, ate, uf=None):
         if estado:
             logger.info(f"{rotulo}: retomando da página {estado}")
         t0 = time.monotonic()
-        params = dict(dataInicial=d1, dataFinal=d2, codigoModalidadeContratacao=m,
-                      pagina=int(estado or 1), tamanhoPagina=PAGINA_TAM)
+        params = dict(
+            dataInicial=d1,
+            dataFinal=d2,
+            codigoModalidadeContratacao=m,
+            pagina=int(estado or 1),
+            tamanhoPagina=PAGINA_TAM,
+        )
         if uf:
             params["uf"] = uf
-        for pag in _paginar(con, f"{CONSULTA}/v1/contratacoes/publicacao", params, rotulo):
+        for pag in _paginar(
+            con, f"{CONSULTA}/v1/contratacoes/publicacao", params, rotulo
+        ):
             meta_set(con, chave, pag + 1)
             con.commit()
         meta_set(con, chave, "fim")
@@ -133,8 +156,10 @@ def abertas(janela, uf=None):
     """
     con = init_db()
     t0 = time.monotonic()
-    logger.info(f"varredura dos últimos {janela} dias (uf={uf or 'BR'}), "
-                f"do mais recente pro mais antigo")
+    logger.info(
+        f"varredura dos últimos {janela} dias (uf={uf or 'BR'}), "
+        f"do mais recente pro mais antigo"
+    )
     fim = date.today()
     while janela > 0:
         ini = fim - timedelta(days=min(7, janela) - 1)
@@ -142,34 +167,60 @@ def abertas(janela, uf=None):
         backfill(ini.isoformat(), fim.isoformat(), uf)
         janela -= 7
         fim = ini - timedelta(days=1)
-    logger.info(f"varredura de abertos concluída em {(time.monotonic() - t0) / 60:.1f} min — "
-                f"{total_no_banco(con)} editais no banco")
+    logger.info(
+        f"varredura de abertos concluída em {(time.monotonic() - t0) / 60:.1f} min — "
+        f"{total_no_banco(con)} editais no banco"
+    )
 
 
 def sync():
     con = init_db()
     hoje = date.today()
     ultima = meta_get(con, "ultima_sync")
-    desde = date.fromisoformat(ultima) - timedelta(days=1) if ultima else hoje - timedelta(days=7)
+    desde = (
+        date.fromisoformat(ultima) - timedelta(days=1)
+        if ultima
+        else hoje - timedelta(days=7)
+    )
     d1, d2 = desde.strftime("%Y%m%d"), hoje.strftime("%Y%m%d")
-    logger.info(f"sync de {desde} até {hoje} (novos + atualizados)")
+    t0 = time.monotonic()
+    antes = total_no_banco(con)
+    logger.info(
+        f"sync de {desde} até {hoje} (novos + atualizados) — {antes} editais no banco"
+    )
     for m in MODALIDADES:
-        params = dict(dataInicial=d1, dataFinal=d2, codigoModalidadeContratacao=m,
-                      pagina=1, tamanhoPagina=PAGINA_TAM)
-        for _ in _paginar(con, f"{CONSULTA}/v1/contratacoes/atualizacao", params, f"modalidade {m}"):
+        params = dict(
+            dataInicial=d1,
+            dataFinal=d2,
+            codigoModalidadeContratacao=m,
+            pagina=1,
+            tamanhoPagina=PAGINA_TAM,
+        )
+        for _ in _paginar(
+            con,
+            f"{CONSULTA}/v1/contratacoes/atualizacao",
+            params,
+            f"{MODALIDADES_NOMES[m]} ({m})",
+        ):
             pass
     meta_set(con, "ultima_sync", hoje.isoformat())
     con.commit()
-    logger.info("sync concluído.")
+    logger.info(
+        f"sync concluído em {(time.monotonic() - t0) / 60:.1f} min — "
+        f"{total_no_banco(con) - antes} editais novos, {total_no_banco(con)} no total"
+    )
 
 
 def fetch_detalhe(con, edital_id, cnpj, ano, sequencial):
     """Baixa itens + arquivos de um edital e grava no banco. Retorna (itens, arquivos)."""
+
     def todas_paginas(recurso):
         acc, pag = [], 1
         while True:
-            lote = get_json(f"{PNCP_API}/v1/orgaos/{cnpj}/compras/{ano}/{sequencial}/{recurso}",
-                            dict(pagina=pag, tamanhoPagina=50))
+            lote = get_json(
+                f"{PNCP_API}/v1/orgaos/{cnpj}/compras/{ano}/{sequencial}/{recurso}",
+                dict(pagina=pag, tamanhoPagina=50),
+            )
             if not lote:
                 break
             acc.extend(lote)
@@ -179,10 +230,18 @@ def fetch_detalhe(con, edital_id, cnpj, ano, sequencial):
         return acc
 
     itens, arquivos = todas_paginas("itens"), todas_paginas("arquivos")
+    logger.debug(
+        f"detalhe {cnpj}/{ano}/{sequencial}: "
+        f"{len(itens)} itens, {len(arquivos)} arquivos"
+    )
     con.execute(
         "UPDATE editais SET itens=?, arquivos=?, itens_atualizado_em=? WHERE id=?",
-        (json.dumps(itens, ensure_ascii=False), json.dumps(arquivos, ensure_ascii=False),
-         datetime.now().isoformat(), edital_id),
+        (
+            json.dumps(itens, ensure_ascii=False),
+            json.dumps(arquivos, ensure_ascii=False),
+            datetime.now().isoformat(),
+            edital_id,
+        ),
     )
     con.commit()
     return itens, arquivos
@@ -216,7 +275,9 @@ def baixar_documentos_de(con, row):
     """Baixa todos os arquivos de um edital para documentos/<numero_controle>/."""
     itens_json = row["arquivos"]
     if itens_json is None:
-        _, arquivos = fetch_detalhe(con, row["id"], row["cnpj"], row["ano"], row["sequencial"])
+        _, arquivos = fetch_detalhe(
+            con, row["id"], row["cnpj"], row["ano"], row["sequencial"]
+        )
     else:
         arquivos = json.loads(itens_json)
     pasta = pasta_docs(row["numero_controle"])
@@ -235,7 +296,7 @@ def baixar_documentos_de(con, row):
         cd = resp.headers.get("Content-Disposition", "")
         m = re.search(r'filename="?([^";]+)', cd)
         nome_orig = m.group(1) if m else (a.get("titulo") or f"doc{seq}")
-        nome = re.sub(r'[^\w.\-]+', "_", nome_orig)[:120]
+        nome = re.sub(r"[^\w.\-]+", "_", nome_orig)[:120]
         (pasta / f"{seq:03d}_{nome}").write_bytes(resp.content)
         logger.info(f"{seq:03d}_{nome} ({len(resp.content) // 1024} KB)")
 
@@ -259,15 +320,23 @@ def baixar_documentos(limite):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    ab = sub.add_parser("abertas", help="varre os últimos N dias (mais recente primeiro)")
+    ab = sub.add_parser(
+        "abertas", help="varre os últimos N dias (mais recente primeiro)"
+    )
     ab.add_argument("--janela", type=int, default=90, help="dias para trás (padrão 90)")
     ab.add_argument("--uf", help="filtrar por UF; omita para Brasil inteiro")
     b = sub.add_parser("backfill", help="carga completa por período de publicação")
     b.add_argument("--desde", required=True, help="YYYY-MM-DD")
-    b.add_argument("--ate", default=date.today().isoformat(), help="YYYY-MM-DD (padrão: hoje)")
+    b.add_argument(
+        "--ate", default=date.today().isoformat(), help="YYYY-MM-DD (padrão: hoje)"
+    )
     b.add_argument("--uf", help="filtrar por UF (ex.: GO); omita para Brasil inteiro")
-    sub.add_parser("sync", help="incremental: novos e atualizados desde a última execução")
-    i = sub.add_parser("itens", help="baixa itens/arquivos dos editais do perfil abertos")
+    sub.add_parser(
+        "sync", help="incremental: novos e atualizados desde a última execução"
+    )
+    i = sub.add_parser(
+        "itens", help="baixa itens/arquivos dos editais do perfil abertos"
+    )
     i.add_argument("--limite", type=int, default=100)
     d = sub.add_parser("documentos", help="baixa os PDFs dos editais do perfil abertos")
     d.add_argument("--limite", type=int, default=50)
