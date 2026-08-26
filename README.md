@@ -32,7 +32,7 @@ Agende no cron, por exemplo: `0 7 * * * cd /caminho/pncp-analyzer && .venv/bin/p
 
 | comando | o que faz |
 |---|---|
-| `abertas [--janela 90] [--uf GO]` | varre os últimos N dias em blocos de 7, mais recente primeiro |
+| `abertas [`--janela 90`] [--uf GO]` | varre os últimos N dias em blocos de 7, mais recente primeiro |
 | `sync` | incremental por data de atualização (pega novos **e** alterados) |
 | `backfill --desde 2024-01-01 [--ate ...] [--uf GO]` | carga histórica por período de publicação |
 | `itens [--limite 100]` | baixa itens + lista de arquivos dos editais do perfil ainda abertos |

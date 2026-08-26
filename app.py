@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 
 from flask import Flask, jsonify, render_template, request, send_from_directory
+from loguru import logger
 
 import db
 import perfil
@@ -12,13 +13,7 @@ import scraper
 app = Flask(__name__)
 db.init_db().close()
 
-MODALIDADES = {
-    1: "Leilão Eletrônico", 2: "Diálogo Competitivo", 3: "Concurso",
-    4: "Concorrência Eletrônica", 5: "Concorrência Presencial", 6: "Pregão Eletrônico",
-    7: "Pregão Presencial", 8: "Dispensa", 9: "Inexigibilidade",
-    10: "Manifestação de Interesse", 11: "Pré-qualificação", 12: "Credenciamento",
-    13: "Leilão Presencial", 14: "Inaplicabilidade da Licitação",
-}
+MODALIDADES = db.MODALIDADES_NOMES
 # tipoBeneficio dos itens: 1 = exclusivo ME/EPP, 3 = cota reservada ME/EPP
 BENEFICIOS_ME_EPP = {1, 3}
 
@@ -101,6 +96,7 @@ def edital():
                                                     row["ano"], row["sequencial"])
             d["itens"], d["arquivos"] = itens, arquivos
         except Exception as e:
+            logger.exception(f"falha ao buscar itens/arquivos de {nc} no PNCP")
             d["itens"], d["arquivos"] = [], []
             d["erro_detalhe"] = f"falha ao buscar itens no PNCP: {e}"
     else:

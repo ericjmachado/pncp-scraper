@@ -13,14 +13,22 @@ Retomável: interrompa com Ctrl+C e rode de novo que continua de onde parou.
 import argparse
 import json
 import re
+import sys
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import requests
+from loguru import logger
 
 import perfil
-from db import init_db, meta_get, meta_set, upsert_edital
+from db import MODALIDADES_NOMES, init_db, meta_get, meta_set, upsert_edital
+
+# console mostra INFO+; o arquivo guarda tudo (DEBUG inclui cada requisição HTTP)
+logger.remove()
+logger.add(sys.stderr, level="INFO")
+logger.add(Path(__file__).parent / "logs" / "scraper.log",
+           rotation="20 MB", retention=10, encoding="utf-8", level="DEBUG")
 
 CONSULTA = "https://pncp.gov.br/api/consulta"
 PNCP_API = "https://pncp.gov.br/api/pncp"
@@ -36,17 +44,22 @@ session.headers["User-Agent"] = "pncp-analyzer/1.0"
 def get_json(url, params=None):
     for tentativa in range(9):
         time.sleep(THROTTLE)
+        t0 = time.monotonic()
         try:
             resp = session.get(url, params=params, timeout=60)
         except requests.RequestException as e:
-            print(f"    erro de rede ({e}), tentando de novo...")
+            logger.warning(f"erro de rede ({e}) em {url} "
+                           f"(tentativa {tentativa + 1}/9), tentando de novo...")
             time.sleep(5 * (tentativa + 1))
             continue
+        logger.debug(f"GET {resp.url} -> {resp.status_code} "
+                     f"({len(resp.content) // 1024} KB em {time.monotonic() - t0:.2f}s)")
         if resp.status_code in (204, 404):
             return None
         if resp.status_code == 429 or resp.status_code >= 500:
             espera = min(5 * 2**tentativa, 120)
-            print(f"    HTTP {resp.status_code}, aguardando {espera}s...")
+            logger.warning(f"HTTP {resp.status_code} (tentativa {tentativa + 1}/9), "
+                           f"aguardando {espera}s...")
             time.sleep(espera)
             continue
         resp.raise_for_status()
@@ -55,17 +68,29 @@ def get_json(url, params=None):
     raise RuntimeError(f"desisti após 9 tentativas: {url}")
 
 
+def total_no_banco(con):
+    return con.execute("SELECT COUNT(*) FROM editais").fetchone()[0]
+
+
 def _paginar(con, url, params, rotulo):
     pagina = params["pagina"]
     while True:
         params["pagina"] = pagina
         d = get_json(url, params)
         if not d or not d.get("data"):
+            logger.debug(f"{rotulo}: página {pagina} vazia, fim")
             break
+        ncs = [r["numeroControlePNCP"] for r in d["data"]]
+        existiam = con.execute(
+            f"SELECT COUNT(*) FROM editais WHERE numero_controle IN ({','.join('?' * len(ncs))})",
+            ncs,
+        ).fetchone()[0]
         for r in d["data"]:
             upsert_edital(con, r)
         con.commit()
-        print(f"{rotulo}: página {pagina}/{d['totalPaginas']} ({d['totalRegistros']} registros)")
+        logger.info(f"{rotulo}: página {pagina}/{d['totalPaginas']} — "
+                    f"{len(ncs)} registros ({len(ncs) - existiam} novos, {existiam} atualizados) "
+                    f"| {d['totalRegistros']} no período")
         yield pagina
         if pagina >= d["totalPaginas"]:
             break
@@ -74,23 +99,30 @@ def _paginar(con, url, params, rotulo):
 
 def backfill(desde, ate, uf=None):
     con = init_db()
+    logger.info(f"backfill de {desde} a {ate} (uf={uf or 'BR'}) — "
+                f"{total_no_banco(con)} editais no banco")
     d1, d2 = desde.replace("-", ""), ate.replace("-", "")
     for m in MODALIDADES:
+        nome = MODALIDADES_NOMES[m]
+        rotulo = f"{nome} ({m})"
         chave = f"backfill:{d1}:{d2}:{uf or 'BR'}:{m}"
         estado = meta_get(con, chave)
         if estado == "fim":
-            print(f"modalidade {m}: já concluída, pulando")
+            logger.info(f"{rotulo}: já concluída, pulando")
             continue
+        if estado:
+            logger.info(f"{rotulo}: retomando da página {estado}")
+        t0 = time.monotonic()
         params = dict(dataInicial=d1, dataFinal=d2, codigoModalidadeContratacao=m,
                       pagina=int(estado or 1), tamanhoPagina=PAGINA_TAM)
         if uf:
             params["uf"] = uf
-        for pag in _paginar(con, f"{CONSULTA}/v1/contratacoes/publicacao", params, f"modalidade {m}"):
+        for pag in _paginar(con, f"{CONSULTA}/v1/contratacoes/publicacao", params, rotulo):
             meta_set(con, chave, pag + 1)
             con.commit()
         meta_set(con, chave, "fim")
         con.commit()
-        print(f"modalidade {m}: concluída")
+        logger.info(f"{rotulo}: concluída em {time.monotonic() - t0:.0f}s")
 
 
 def abertas(janela, uf=None):
@@ -99,14 +131,19 @@ def abertas(janela, uf=None):
     O endpoint /contratacoes/proposta (só abertos) responde 504 no PNCP; varrer a
     publicação recente cobre a mesma coisa — a interface filtra pelo prazo.
     """
+    con = init_db()
+    t0 = time.monotonic()
+    logger.info(f"varredura dos últimos {janela} dias (uf={uf or 'BR'}), "
+                f"do mais recente pro mais antigo")
     fim = date.today()
     while janela > 0:
         ini = fim - timedelta(days=min(7, janela) - 1)
-        print(f"== bloco {ini} a {fim} ==")
+        logger.info(f"== bloco {ini} a {fim} ==")
         backfill(ini.isoformat(), fim.isoformat(), uf)
         janela -= 7
         fim = ini - timedelta(days=1)
-    print("varredura de abertos concluída.")
+    logger.info(f"varredura de abertos concluída em {(time.monotonic() - t0) / 60:.1f} min — "
+                f"{total_no_banco(con)} editais no banco")
 
 
 def sync():
@@ -115,7 +152,7 @@ def sync():
     ultima = meta_get(con, "ultima_sync")
     desde = date.fromisoformat(ultima) - timedelta(days=1) if ultima else hoje - timedelta(days=7)
     d1, d2 = desde.strftime("%Y%m%d"), hoje.strftime("%Y%m%d")
-    print(f"sync de {desde} até {hoje} (novos + atualizados)")
+    logger.info(f"sync de {desde} até {hoje} (novos + atualizados)")
     for m in MODALIDADES:
         params = dict(dataInicial=d1, dataFinal=d2, codigoModalidadeContratacao=m,
                       pagina=1, tamanhoPagina=PAGINA_TAM)
@@ -123,7 +160,7 @@ def sync():
             pass
     meta_set(con, "ultima_sync", hoje.isoformat())
     con.commit()
-    print("sync concluído.")
+    logger.info("sync concluído.")
 
 
 def fetch_detalhe(con, edital_id, cnpj, ano, sequencial):
@@ -162,10 +199,10 @@ def baixar_itens(limite):
            ORDER BY e.data_encerramento LIMIT ?""",
         (perfil.fts_query_perfil(), agora, limite),
     ).fetchall()
-    print(f"{len(rows)} editais do perfil sem itens")
+    logger.info(f"{len(rows)} editais do perfil sem itens")
     for i, r in enumerate(rows, 1):
         fetch_detalhe(con, r["id"], r["cnpj"], r["ano"], r["sequencial"])
-        print(f"[{i}/{len(rows)}] {r['numero_controle']}")
+        logger.info(f"[{i}/{len(rows)}] {r['numero_controle']}")
 
 
 DOCS_DIR = Path(__file__).parent / "documentos"
@@ -193,14 +230,14 @@ def baixar_documentos_de(con, row):
         time.sleep(THROTTLE)
         resp = session.get(a["url"], timeout=120)
         if resp.status_code != 200:
-            print(f"    arquivo {seq}: HTTP {resp.status_code}, pulando")
+            logger.warning(f"arquivo {seq}: HTTP {resp.status_code}, pulando")
             continue
         cd = resp.headers.get("Content-Disposition", "")
         m = re.search(r'filename="?([^";]+)', cd)
         nome_orig = m.group(1) if m else (a.get("titulo") or f"doc{seq}")
         nome = re.sub(r'[^\w.\-]+', "_", nome_orig)[:120]
         (pasta / f"{seq:03d}_{nome}").write_bytes(resp.content)
-        print(f"    {seq:03d}_{nome} ({len(resp.content) // 1024} KB)")
+        logger.info(f"{seq:03d}_{nome} ({len(resp.content) // 1024} KB)")
 
 
 def baixar_documentos(limite):
@@ -213,9 +250,9 @@ def baixar_documentos(limite):
            ORDER BY e.data_encerramento LIMIT ?""",
         (perfil.fts_query_perfil(), agora, limite),
     ).fetchall()
-    print(f"{len(rows)} editais do perfil abertos")
+    logger.info(f"{len(rows)} editais do perfil abertos")
     for i, r in enumerate(rows, 1):
-        print(f"[{i}/{len(rows)}] {r['numero_controle']}")
+        logger.info(f"[{i}/{len(rows)}] {r['numero_controle']}")
         baixar_documentos_de(con, r)
 
 
@@ -240,7 +277,7 @@ if __name__ == "__main__":
             abertas(args.janela, args.uf)
         elif args.cmd == "backfill":
             backfill(args.desde, args.ate, args.uf)
-            print("backfill concluído.")
+            logger.info("backfill concluído.")
         elif args.cmd == "sync":
             sync()
         elif args.cmd == "itens":
@@ -248,4 +285,4 @@ if __name__ == "__main__":
         else:
             baixar_documentos(args.limite)
     except KeyboardInterrupt:
-        print("\ninterrompido — rode de novo para continuar de onde parou.")
+        logger.info("interrompido — rode de novo para continuar de onde parou.")
